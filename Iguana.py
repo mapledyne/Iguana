@@ -1,16 +1,31 @@
 """Access to the Iguana API."""
-import requests
-import json
 from bs4 import BeautifulSoup
+from distutils.version import LooseVersion
+import json
+import requests
 
 
 class Channel(object):
-    """A Channel object to wrap aspects of a channel."""
+    """A Channel object to wrap aspects of a channel.
+
+    This should be used by sending a default config on object creation
+    (see Iguana.default_config()). Once created, you can edit the config
+    with the various properties of this object. Return the resulting
+    XML by just getting the string version of this, and then pass that
+    back to the Iguana object to do what you want with it - add/edit/delete
+    the channel.
+
+    >>> i = Iguana()
+    >>> c = Channel(i.default_config('LLP Listener', 'To Database'))
+    >>> c.name = 'channeltest'
+    >>> c.port = 12345
+    >>> i.channel_create(c)
+    """
 
     def __init__(self, config):
         """Build the Channel object."""
         super(Channel, self).__init__()
-        self._soup = BeautifulSoup(config, 'html.parser')
+        self._soup = BeautifulSoup(str(config), 'html.parser')
 
     @property
     def name(self):
@@ -19,11 +34,11 @@ class Channel(object):
 
     @name.setter
     def name(self, new_name):
-        """Change the name of the property."""
         self._soup.channel['name'] = new_name
 
     @property
     def start_automatically(self):
+        """True if the channel is set to start automatically."""
         return self._soup.channel['start_automatically']
 
     @start_automatically.setter
@@ -32,6 +47,7 @@ class Channel(object):
 
     @property
     def port(self):
+        """Return the port this channel listens to."""
         return self._soup.channel.from_llp_listener['port']
 
     @port.setter
@@ -40,6 +56,7 @@ class Channel(object):
 
     @property
     def database_reconnection_interval(self):
+        """The time between reconnection attempts."""
         return self._soup.channel['database_reconnection_interval']
 
     @database_reconnection_interval.setter
@@ -48,6 +65,7 @@ class Channel(object):
 
     @property
     def maximum_database_reconnections(self):
+        """The number of reconnection attempts."""
         return self._soup.channel['maximum_database_reconnections']
 
     @maximum_database_reconnections.setter
@@ -56,6 +74,7 @@ class Channel(object):
 
     @property
     def database_timeout_seconds(self):
+        """Time before giving up on a database connection."""
         return self._soup.channel['database_timeout_seconds']
 
     @database_timeout_seconds.setter
@@ -64,6 +83,10 @@ class Channel(object):
 
     @property
     def action_on_parse_error(self):
+        """Action to be taken on a parse error.
+
+        Choose 'skip' to ignore errors and continue parsing.
+        """
         return self._soup.channel['action_on_parse_error']
 
     @action_on_parse_error.setter
@@ -72,6 +95,10 @@ class Channel(object):
 
     @property
     def action_on_db_error(self):
+        """Action to be taken on a database error.
+
+        Choose 'skip' to ignore errors and continue sending remaining data.
+        """
         return self._soup.channel['action_on_db_error']
 
     @action_on_db_error.setter
@@ -88,25 +115,49 @@ class Channel(object):
         return str(self._soup)
 
 
-class Version(object):
-    """Simple version object to access system versions."""
+class IguanaApiRresult(object):
+    """Used to hold the return values in an API return call from Iguana."""
 
-    def __init__(self, major, minor, build, ext=0):
-        """Create version object."""
-        super(Version, self).__init__()
-        self.major = major
-        self.minor = minor
-        self.build = build
-        if len(ext) == 0:
-            ext = 0
-        self.ext = ext
+    def __init__(self, message):
+        """Build the IguanaApiRresult object."""
+        super(IguanaApiRresult, self).__init__()
+        self.status = 0
+        self.text = ''
+        self._parse_message(message)
+
+    def _parse_message(self, msg):
+        """Simple parsing to see if we have an error return from the API."""
+        try:
+            result = json.loads(msg)
+            if 'error' in result:
+                self.status = result['error']['return_code']
+                self.text = result['error']['description']
+                return
+        except ValueError:
+            # ValueError (translating to 'this message isn't JSON', in this
+            # case) means we got something decent - errors from the API come
+            # to us as JSON. If it isn't JSON, it's not an error (and most
+            # likely XML). Pass the contents up.
+            pass
+
+        self.status = 0
+        self.text = msg
+
+    def __int__(self):
+        """The error code, if we have one."""
+        return self.status
 
     def __str__(self):
-        """Convert version to a string."""
-        ver = str(self.major) + '.' + str(self.minor) + '.' + str(self.build)
-        if self.ext > 0:
-            ver += '.' + str(self.ext)
-        return ver
+        """The body of the message itself."""
+        return self.text
+
+    def __bool__(self):
+        """True if we don't have an error."""
+        return self.status == 0
+
+    def __len__(self):
+        """Length of the message."""
+        return len(self.text)
 
 
 class Iguana(object):
@@ -126,13 +177,26 @@ class Iguana(object):
         if not url.startswith('http://'):
             url = self.url_base + url
         ret = requests.post(url, auth=(self.user, self.password), data=payload)
-        return ret.text
+        return IguanaApiRresult(ret.text)
 
     def version(self):
-        """Get the version running on the server."""
-        ver = json.loads(self.api('current_version'))
-        v = Version(ver['Major'], ver['Minor'], ver['Build'], ver['BuildExt'])
-        return v
+        """Get the version running on the server.
+
+        Using LooseVersion() in case BuildExt is used and it'd probably be
+        good to support that version tag if/when used. Sad, since
+        StrictVersion() > LooseVersion() in almost every other way.
+
+        Still, this gives us handy version comparisons if we want it.
+        """
+        ver = json.loads(str(self.api('current_version')))
+        v = (str(ver['Major']) + '.' +
+             str(ver['Minor']) + '.' +
+             str(ver['Build']))
+
+        if (len(ver['BuildExt']) > 0):
+            v += '.' + ver['BuildExt']
+
+        return LooseVersion(v)
 
     def monitor(self):
         """Some system monitoring values."""
@@ -156,12 +220,15 @@ class Iguana(object):
         return default_config
 
     def channel_create(self, channel):
+        """Given a Channel object, create a new channel."""
         raise NotImplementedError
 
     def channel_update(self, channel):
+        """Update an existing channel with this Channel object."""
         raise NotImplementedError
 
     def channel_remove(self, channel):
+        """Remove this channel."""
         raise NotImplementedError
 
     def status(self):
@@ -169,10 +236,34 @@ class Iguana(object):
         stat = self.api('status')
         return stat
 
+    def channel_config(self, guid, is_name=False):
+        """Load a channel config and return it as a Channel object.
+
+        Searching by GUID is recommended by INTERFACEWARE, but this can
+        search by name as well. Set the 'is_name' value to True when doing so.
+        """
+        var = 'guid'
+        if is_name:
+            var = 'name'
+        result = self.api('get_channel_config', {var: guid})
+        if not result:
+            return None
+
+        return Channel(str(result))
+
+    def channel_update(self, channel):
+        """Update a channel from a Channel object."""
+        if type(channel) is not Channel:
+            raise TypeError('channel_update() requires a Channel object.')
+
+        self.api('update_channel', {'config': channel})
+
     def channel_start(self, channel):
+        """Start a channel."""
         raise NotImplementedError
 
     def channel_stop(self, channel):
+        """Stop a channel."""
         raise NotImplementedError
 
     def channel_restart(self, channel):
@@ -199,18 +290,12 @@ class Iguana(object):
 
 if __name__ == '__main__':
     i = Iguana()
-    print(i.version())
-    config = i.default_config('LLP Listener', 'To Database')
-    c = Channel(config)
-    print(c.name)
-    print(str(c))
-    print('#######')
-    c.name = 'Biff'
-    print(str(c))
-    print('#######')
-    print(c.port)
-    c.port = 12345
-    print(str(c))
+    c = Channel(i.default_config('LLP Listener', 'To Database'))
+    c.name = 'channeltest123'
+    c.port = 123
+    i.channel_create(c)
+
+    print(c)
 
 #    print(i.status())
 #    print(i.monitor())
